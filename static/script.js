@@ -269,6 +269,10 @@ function loadVideo(videoInfo, playlistInfo = null, playlistIndex = -1) {
     // Clear any existing video source
     videoPlayer.src = '';
     
+    // Clear any existing subtitle tracks
+    const existingTracks = videoPlayer.querySelectorAll('track');
+    existingTracks.forEach(track => track.remove());
+    
     // Set new video source
     videoPlayer.src = videoInfo.url;
     videoTitle.textContent = videoInfo.name;
@@ -278,6 +282,7 @@ function loadVideo(videoInfo, playlistInfo = null, playlistIndex = -1) {
     videoPlayer.onerror = function(e) {
         console.error('Video loading error:', e);
         console.error('Failed to load:', videoInfo.url);
+        console.error('Video error code:', videoPlayer.error ? videoPlayer.error.code : 'Unknown');
         showNotification('Failed to load video: ' + videoInfo.name, 'error');
     };
     
@@ -289,6 +294,14 @@ function loadVideo(videoInfo, playlistInfo = null, playlistIndex = -1) {
     videoPlayer.oncanplay = function() {
         console.log('Video can play');
         showLoading(false);
+    };
+    
+    videoPlayer.onloadeddata = function() {
+        console.log('Video data loaded');
+    };
+    
+    videoPlayer.onloadedmetadata = function() {
+        console.log('Video metadata loaded');
     };
     
     // Update active file in list
@@ -379,16 +392,19 @@ async function loadFiles(path = '', sortBy = null, sortOrder = null) {
         if (response.ok) {
             currentPath = data.current_path;
             console.log('Loaded items:', data.items);
+            console.log('Current path:', currentPath);
             renderFiles(data.items);
             updateBreadcrumb(data.current_path, data.parent_path);
             
             // Update all videos list for navigation
             allVideos = [];
             extractVideos(data.items, allVideos);
+            console.log('Extracted videos:', allVideos.length);
         } else {
             showNotification(data.error || 'Failed to load files', 'error');
         }
     } catch (error) {
+        console.error('Load files error:', error);
         showNotification('Network error', 'error');
     } finally {
         showLoading(false);
@@ -421,6 +437,7 @@ function renderFiles(items) {
     
     fileList.innerHTML = items.map(item => {
         const isVideo = item.type === 'video' || item.type === 'audio';
+        console.log(`Rendering item: ${item.name}, type: ${item.type}, isVideo: ${isVideo}, thumbnail: ${item.thumbnail}`);
         
         let thumbnail = '';
         if (item.thumbnail) {
@@ -980,6 +997,18 @@ async function loadSubtitles(videoPath) {
 }
 
 // Utility functions
+function getFileType(extension) {
+    const videoExtensions = ['mp4', 'avi', 'mkv', 'mov', 'wmv', 'flv', 'webm', 'ogg', 'ogv', 'm4v', 'mpg', 'mpeg'];
+    const audioExtensions = ['mp3', 'wav', 'flac', 'aac', 'oga', 'wma', 'm4a', 'opus'];
+    
+    if (videoExtensions.includes(extension.toLowerCase())) {
+        return 'video';
+    } else if (audioExtensions.includes(extension.toLowerCase())) {
+        return 'audio';
+    }
+    return 'unknown';
+}
+
 function formatTime(seconds) {
     if (!seconds || isNaN(seconds)) return '0:00';
     
@@ -1051,11 +1080,25 @@ function playFile(path) {
     console.log('Found video info:', videoInfo);
     
     if (videoInfo) {
+        console.log('Loading video with URL:', videoInfo.url);
         loadVideo(videoInfo);
     } else {
         console.error('Video info not found for path:', path);
         console.error('Available paths:', allVideos.map(v => v.path));
-        showNotification('Video not found', 'error');
+        
+        // Try to create a basic video info object if the file exists
+        const basicVideoInfo = {
+            name: path.split('/').pop(),
+            path: path,
+            url: `/static/videos/${path}`,
+            type: getFileType(path.split('.').pop()),
+            size: 0,
+            thumbnail: null,
+            duration: null
+        };
+        
+        console.log('Trying with basic video info:', basicVideoInfo);
+        loadVideo(basicVideoInfo);
     }
 }
 

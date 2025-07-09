@@ -181,14 +181,19 @@ def get_file_type(filename):
 def generate_thumbnail(video_path, thumbnail_path):
     """Generate thumbnail for video at 55 seconds using ffmpeg (if available)"""
     try:
-        full_video_path = os.path.join(UPLOAD_FOLDER, video_path)
+        # Normalize path separators for cross-platform compatibility
+        normalized_video_path = video_path.replace('/', os.sep).replace('\\', os.sep)
+        full_video_path = os.path.join(UPLOAD_FOLDER, normalized_video_path)
         
         if not os.path.exists(full_video_path):
             print(f"Video file not found: {full_video_path}")
             return create_placeholder_thumbnail(thumbnail_path)
         
-        thumbnail_dir = os.path.dirname(thumbnail_path)
-        os.makedirs(thumbnail_dir, exist_ok=True)
+        # Ensure thumbnail directory exists
+        if not thumbnail_path.startswith('data:'):
+            thumbnail_dir = os.path.dirname(thumbnail_path)
+            if thumbnail_dir:
+                os.makedirs(thumbnail_dir, exist_ok=True)
         
         print(f"Generating thumbnail for: {full_video_path}")
         
@@ -257,7 +262,7 @@ def generate_thumbnail(video_path, thumbnail_path):
                 
                 return create_placeholder_thumbnail(thumbnail_path)
                 
-        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.CalledProcessError) as e:
+        except (subprocess.TimeoutExpired, FileNotFoundError, subprocess.CalledProcessError, OSError) as e:
             print(f"FFmpeg error: {e}")
             return create_placeholder_thumbnail(thumbnail_path)
             
@@ -317,7 +322,13 @@ def is_audio_file_detailed(filename):
 def get_video_duration(file_path):
     """Get video duration using ffprobe"""
     try:
-        full_path = os.path.join(UPLOAD_FOLDER, file_path)
+        normalized_path = file_path.replace('/', os.sep).replace('\\', os.sep)
+        full_path = os.path.join(UPLOAD_FOLDER, normalized_path)
+        
+        if not os.path.exists(full_path):
+            print(f"File not found for duration check: {full_path}")
+            return None
+            
         cmd = [
             'ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
             '-of', 'csv=p=0', full_path
@@ -327,13 +338,16 @@ def get_video_duration(file_path):
             duration = float(result.stdout.strip())
             print(f"Duration for {file_path}: {duration} seconds")
             return duration
+        else:
+            print(f"ffprobe failed for {file_path}: {result.stderr}")
     except Exception as e:
         print(f"Error getting duration for {file_path}: {e}")
-        pass
     return None
 
 def get_video_metadata(file_path):
     """Get video metadata including thumbnail"""
+    print(f"Getting metadata for: {file_path}")
+    
     conn = sqlite3.connect(DATABASE_FILE)
     cursor = conn.cursor()
     
@@ -347,15 +361,26 @@ def get_video_metadata(file_path):
         
         print(f"Processing metadata for: {file_path}")
         
-        # Generate thumbnail
-        thumbnail_url = generate_thumbnail(file_path, thumbnail_path)
+        # Generate thumbnail only for video files
+        thumbnail_url = None
+        if is_video_file(file_path):
+            try:
+                thumbnail_url = generate_thumbnail(file_path, thumbnail_path)
+            except Exception as e:
+                print(f"Thumbnail generation failed for {file_path}: {e}")
+                thumbnail_url = create_placeholder_thumbnail(thumbnail_path)
+        else:
+            # For audio files, create a simple placeholder
+            thumbnail_url = create_placeholder_thumbnail(thumbnail_path)
         
         # Get file size and duration
         try:
-            full_path = os.path.join(UPLOAD_FOLDER, file_path)
+            normalized_path = file_path.replace('/', os.sep).replace('\\', os.sep)
+            full_path = os.path.join(UPLOAD_FOLDER, normalized_path)
             file_size = os.path.getsize(full_path)
-            duration = get_video_duration(file_path)
-        except:
+            duration = get_video_duration(file_path) if is_video_file(file_path) else None
+        except Exception as e:
+            print(f"Error getting file info for {file_path}: {e}")
             file_size = 0
             duration = None
         
@@ -376,17 +401,23 @@ def get_video_metadata(file_path):
 def scan_directory_recursive(directory_path, base_path='', sort_by='name', sort_order='asc'):
     """Recursively scan directory for media files with metadata and sorting"""
     items = []
+    print(f"Scanning directory: {directory_path}, base_path: {base_path}")
     
     try:
         if not os.path.exists(directory_path):
+            print(f"Directory does not exist: {directory_path}")
             return items
             
         for item in os.listdir(directory_path):
             item_path = os.path.join(directory_path, item)
             relative_path = os.path.join(base_path, item) if base_path else item
             
+            # Normalize path separators for consistency
+            relative_path = relative_path.replace(os.sep, '/')
+            
             if os.path.isdir(item_path):
                 # It's a directory
+                print(f"Found directory: {item}")
                 folder_info = {
                     'name': item,
                     'type': 'folder',
@@ -400,29 +431,38 @@ def scan_directory_recursive(directory_path, base_path='', sort_by='name', sort_
             elif allowed_file(item):
                 # It's a media file
                 print(f"Found media file: {item}")
-                file_size = os.path.getsize(item_path)
-                file_modified = os.path.getmtime(item_path)
-                metadata = get_video_metadata(relative_path)
-                
-                file_info = {
-                    'name': item,
-                    'type': get_file_type(item),
-                    'path': relative_path,
-                    'full_path': item_path,
-                    'url': f'/static/videos/{relative_path.replace(os.sep, "/").replace(chr(92), "/")}',
-                    'size': file_size,
-                    'modified': file_modified,
-                    'thumbnail': metadata[2] if metadata else None,
-                    'duration': metadata[3] if metadata else None,
-                    'resolution': metadata[4] if metadata else None
-                }
-                print(f"Added file info: {file_info['name']} - Type: {file_info['type']}")
-                items.append(file_info)
+                try:
+                    file_size = os.path.getsize(item_path)
+                    file_modified = os.path.getmtime(item_path)
+                    
+                    # Get metadata in a separate try-catch to prevent blocking
+                    metadata = None
+                    try:
+                        metadata = get_video_metadata(relative_path)
+                    except Exception as e:
+                        print(f"Metadata generation failed for {relative_path}: {e}")
+                    
+                    file_info = {
+                        'name': item,
+                        'type': get_file_type(item),
+                        'path': relative_path,
+                        'full_path': item_path,
+                        'url': f'/static/videos/{relative_path}',
+                        'size': file_size,
+                        'modified': file_modified,
+                        'thumbnail': metadata[2] if metadata else None,
+                        'duration': metadata[3] if metadata else None,
+                        'resolution': metadata[4] if metadata else None
+                    }
+                    print(f"Added file info: {file_info['name']} - Type: {file_info['type']} - URL: {file_info['url']}")
+                    items.append(file_info)
+                except Exception as e:
+                    print(f"Error processing file {item}: {e}")
+                    continue
             else:
                 print(f"File not allowed: {item}")
     except PermissionError:
         print(f"Permission denied for directory: {directory_path}")
-        pass
     except Exception as e:
         print(f"Error scanning directory {directory_path}: {e}")
     
@@ -460,6 +500,9 @@ def search_files_recursive(directory_path, query, search_type='file', base_path=
             item_path = os.path.join(directory_path, item)
             relative_path = os.path.join(base_path, item) if base_path else item
             
+            # Normalize path separators
+            relative_path = relative_path.replace(os.sep, '/')
+            
             if os.path.isdir(item_path):
                 # Check if folder matches search (for folder search)
                 if search_type == 'folder' and query_lower in item.lower():
@@ -477,22 +520,28 @@ def search_files_recursive(directory_path, query, search_type='file', base_path=
                 
             elif search_type == 'file' and allowed_file(item) and query_lower in item.lower():
                 # File matches search query
-                file_size = os.path.getsize(item_path)
-                metadata = get_video_metadata(relative_path)
-                
-                file_info = {
-                    'name': item,
-                    'type': get_file_type(item),
-                    'path': relative_path,
-                    'full_path': item_path,
-                    'url': f'/static/videos/{relative_path.replace(os.sep, "/").replace(chr(92), "/")}',
-                    'size': file_size,
-                    'folder': os.path.dirname(relative_path) if os.path.dirname(relative_path) else 'Root',
-                    'thumbnail': metadata[2] if metadata else None
-                }
-                results.append(file_info)
+                try:
+                    file_size = os.path.getsize(item_path)
+                    
+                    # Skip metadata generation for search results to improve performance
+                    file_info = {
+                        'name': item,
+                        'type': get_file_type(item),
+                        'path': relative_path,
+                        'full_path': item_path,
+                        'url': f'/static/videos/{relative_path}',
+                        'size': file_size,
+                        'folder': os.path.dirname(relative_path) if os.path.dirname(relative_path) else 'Root',
+                        'thumbnail': None  # Skip thumbnail for search results
+                    }
+                    results.append(file_info)
+                except Exception as e:
+                    print(f"Error processing search result {item}: {e}")
+                    continue
     except PermissionError:
-        pass
+        print(f"Permission denied for search in: {directory_path}")
+    except Exception as e:
+        print(f"Error during search in {directory_path}: {e}")
     
     return results
 
@@ -1197,6 +1246,10 @@ def download_video(video_path):
         if not os.path.exists(full_path):
             print(f"File not found: {full_path}")
             return jsonify({'error': 'File not found'}), 404
+        
+        # Security check
+        if not os.path.abspath(full_path).startswith(os.path.abspath(app.config['UPLOAD_FOLDER'])):
+            return jsonify({'error': 'Access denied'}), 403
             
         return send_from_directory(app.config['UPLOAD_FOLDER'], normalized_path, as_attachment=True)
     except FileNotFoundError:
@@ -1222,6 +1275,11 @@ def serve_video(filename):
         if not os.path.exists(full_path):
             print(f"Video file not found: {full_path}")
             return "File not found", 404
+        
+        # Security check - ensure the path is within the upload folder
+        if not os.path.abspath(full_path).startswith(os.path.abspath(app.config['UPLOAD_FOLDER'])):
+            print(f"Security violation: Path outside upload folder")
+            return "Access denied", 403
         
         # Get file directory and name
         directory = os.path.dirname(full_path)
